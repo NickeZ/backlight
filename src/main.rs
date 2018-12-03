@@ -1,11 +1,9 @@
-#[macro_use]
-extern crate structopt;
-
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io;
 use std::string::String;
+use notify_rust::Notification;
 
 use structopt::StructOpt;
 
@@ -34,9 +32,9 @@ fn clamp<T: PartialOrd>(val: T, min: T, max: T) -> T {
         val
     }
 }
+
 #[derive(StructOpt, Debug)]
-#[structopt(name = "backlight")]
-enum Opt {
+enum Action {
     #[structopt(name = "get")]
     Get,
     #[structopt(name = "set")]
@@ -51,7 +49,15 @@ enum Opt {
     Dec {
         dec: f32,
     },
+}
 
+#[derive(StructOpt, Debug)]
+#[structopt(name = "backlight")]
+struct Opt {
+    #[structopt(short="q", long="quiet")]
+    quiet: bool,
+    #[structopt(subcommand)]
+    action: Action,
 }
 
 fn main() {
@@ -62,29 +68,30 @@ fn main() {
 
     let mut new = actual;
 
-    match opt {
-        Opt::Get => {
+    match opt.action {
+        Action::Get => {
             println!("{:.0}% ({})", 100.*actual/max, actual);
         },
-        Opt::Set {set} => {
+        Action::Set {set} => {
             new = clamp(max/100.0*set, 0., max);
         },
-        Opt::Inc {inc} => {
+        Action::Inc {inc} => {
             let step = max/100.0*inc;
             new = clamp(actual+step, 0., max);
         },
-        Opt::Dec {dec} => {
+        Action::Dec {dec} => {
             let step = max/100.0*dec;
             new = clamp(actual-step, 0., max);
         }
     }
 
-    if new != actual {
+    if (new - actual).abs() < 0.001 {
         println!("{:.0}% ({})", 100.*new/max, new);
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
             .open("/sys/class/backlight/intel_backlight/brightness").unwrap();
         write!(file, "{}", new as i32).unwrap();
+        Notification::new().summary(&format!("Brightness at {}%", 100.*new/max)).show().unwrap();
     }
 }

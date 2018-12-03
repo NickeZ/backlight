@@ -2,6 +2,8 @@
 name = "backlight"
 version = "0.1.0"
 authors = ["Niklas Claesson <nicke.claesson@gmail.com>"]
+edition = "2018"
 
 [dependencies]
 structopt = "0.2.12"
+notify-rust = "3.5.0"
