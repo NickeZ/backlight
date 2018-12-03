@@ -1,11 +1,13 @@
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
+use std::path::PathBuf;
 use std::io;
 use std::string::String;
-use notify_rust::Notification;
 
+use notify_rust::Notification;
 use structopt::StructOpt;
+use directories::ProjectDirs;
 
 fn get_number(file: &str) -> io::Result<f32> {
     let mut target = String::new();
@@ -85,13 +87,59 @@ fn main() {
         }
     }
 
-    if (new - actual).abs() < 0.001 {
+    let (current_id, filename) = {
+        let proj_dirs = ProjectDirs::from("", "", "Backlight");
+        if let Some(proj_dirs) = proj_dirs {
+            let filename = PathBuf::from(proj_dirs.cache_dir());
+            if let Ok(mut file) = File::open(&filename) {
+                let mut current_id = String::new();
+                if let Ok(_len) = file.read_to_string(&mut current_id) {
+                    if let Ok(current_id) = current_id.parse::<u32>() {
+                        (Some(current_id), Some(filename))
+                    }
+                    else  {
+                        println!("Failed to parse u32");
+                        (None, Some(filename))
+                    }
+
+                } else {
+                    println!("Failed to read file");
+                    (None, Some(filename))
+                }
+            } else {
+                (None, Some(filename))
+            }
+        } else{
+            (None, None)
+        }
+    };
+
+    if (new - actual).abs() > 0.001 {
         println!("{:.0}% ({})", 100.*new/max, new);
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
             .open("/sys/class/backlight/intel_backlight/brightness").unwrap();
         write!(file, "{}", new as i32).unwrap();
-        Notification::new().summary(&format!("Brightness at {}%", 100.*new/max)).show().unwrap();
+        let nf = if let Some(id) = current_id {
+            Notification::new()
+                .id(id)
+                .summary(&format!("Brightness at {:.0}%", 100.*new/max))
+                .appname("backlight")
+                .show().unwrap()
+        } else {
+            Notification::new()
+                .summary(&format!("Brightness at {:.0}%", 100.*new/max))
+                .appname("backlight")
+                .show().unwrap()
+        };
+        if let Some(filename) = filename {
+            let mut run_state_file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(filename).expect("Failed to open state file");
+            write!(run_state_file, "{}", nf.id()).expect("Failed to write");
+        }
     }
 }
