@@ -35,6 +35,13 @@ fn clamp<T: PartialOrd>(val: T, min: T, max: T) -> T {
     }
 }
 
+// Ignore errors when outputing errors
+macro_rules! error {
+    ($($x:tt)*) => {
+        let _ = writeln!(std::io::stderr(), $($x)*);
+    }
+}
+
 #[derive(StructOpt, Debug)]
 enum Action {
     #[structopt(name = "get")]
@@ -98,12 +105,16 @@ fn main() {
                         (Some(current_id), Some(filename))
                     }
                     else  {
-                        println!("Failed to parse u32");
+                        if !opt.quiet {
+                            error!("Failed to parse u32");
+                        }
                         (None, Some(filename))
                     }
 
                 } else {
-                    println!("Failed to read file");
+                    if !opt.quiet {
+                        error!("Failed to read file");
+                    }
                     (None, Some(filename))
                 }
             } else {
@@ -115,31 +126,30 @@ fn main() {
     };
 
     if (new - actual).abs() > 0.001 {
-        println!("{:.0}% ({})", 100.*new/max, new);
+        if !opt.quiet{
+            println!("{:.0}% ({})", 100.*new/max, new);
+        }
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
             .open("/sys/class/backlight/intel_backlight/brightness").unwrap();
         write!(file, "{}", new as i32).unwrap();
-        let nf = if let Some(id) = current_id {
-            Notification::new()
-                .id(id)
-                .summary(&format!("Brightness at {:.0}%", 100.*new/max))
-                .appname("backlight")
-                .show().unwrap()
-        } else {
-            Notification::new()
-                .summary(&format!("Brightness at {:.0}%", 100.*new/max))
-                .appname("backlight")
-                .show().unwrap()
-        };
-        if let Some(filename) = filename {
-            let mut run_state_file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(filename).expect("Failed to open state file");
-            write!(run_state_file, "{}", nf.id()).expect("Failed to write");
+        if !opt.quiet {
+            let mut builder = Notification::new();
+            builder.summary(&format!("Brightness at {:.0}%", 100.*new/max));
+            builder.appname("backlight");
+            if let Some(id) = current_id {
+                builder.id(id);
+            }
+            let nf = builder.show().unwrap();
+            if let Some(filename) = filename {
+                let mut run_state_file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(filename).expect("Failed to open state file");
+                write!(run_state_file, "{}", nf.id()).expect("Failed to write");
+            }
         }
     }
 }
