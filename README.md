@@ -23,3 +23,10 @@ SUBCOMMANDS:
     inc
     set
 ```
+
+## I3 Config
+
+```
+bindsym XF86MonBrightnessDown exec --no-startup-id backlight dec 5
+bindsym XF86MonBrightnessUp exec --no-startup-id backlight inc 5
+```
