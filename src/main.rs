@@ -1,13 +1,21 @@
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io;
 use std::io::prelude::*;
 use std::path::PathBuf;
-use std::io;
 use std::string::String;
 
+use directories::ProjectDirs;
 use notify_rust::Notification;
 use structopt::StructOpt;
-use directories::ProjectDirs;
+
+// Ignore errors when outputing errors
+// TODO: should only print if opt.quiet == false
+macro_rules! error {
+    ($($x:tt)*) => {
+        let _ = writeln!(std::io::stderr(), $($x)*);
+    }
+}
 
 fn get_number(file: &str) -> io::Result<f32> {
     let mut target = String::new();
@@ -35,11 +43,36 @@ fn clamp<T: PartialOrd>(val: T, min: T, max: T) -> T {
     }
 }
 
-// Ignore errors when outputing errors
-macro_rules! error {
-    ($($x:tt)*) => {
-        let _ = writeln!(std::io::stderr(), $($x)*);
-    }
+fn get_notification_filename() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "Backlight").map(|dirs| PathBuf::from(dirs.cache_dir()))
+}
+
+fn get_notification_id(opt: &Opt, filename: &PathBuf) -> Option<u32> {
+    let mut file = File::open(filename)
+        .map_err(|_err| {
+            if !opt.quiet {
+                error!("Failed to open file");
+            }
+        })
+        .ok()?;
+
+    let mut current_id = String::new();
+    file.read_to_string(&mut current_id)
+        .map_err(|_err| {
+            if !opt.quiet {
+                error!("Failed to read file");
+            }
+        })
+        .ok()?;
+
+    current_id
+        .parse::<u32>()
+        .map_err(|_err| {
+            if !opt.quiet {
+                error!("Failed to parse u32");
+            }
+        })
+        .ok()
 }
 
 #[derive(StructOpt, Debug)]
@@ -47,109 +80,79 @@ enum Action {
     #[structopt(name = "get")]
     Get,
     #[structopt(name = "set")]
-    Set {
-        set: f32,
-    },
+    Set { set: f32 },
     #[structopt(name = "inc")]
-    Inc {
-        inc: f32,
-    },
+    Inc { inc: f32 },
     #[structopt(name = "dec")]
-    Dec {
-        dec: f32,
-    },
+    Dec { dec: f32 },
 }
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "backlight")]
 struct Opt {
-    #[structopt(short="q", long="quiet")]
+    #[structopt(short = "q", long = "quiet")]
     quiet: bool,
     #[structopt(subcommand)]
     action: Action,
 }
 
-fn main() {
-    let max = get_number("max_brightness").unwrap();
-    let actual = get_number("actual_brightness").unwrap();
-
+fn main() -> io::Result<()> {
     let opt = Opt::from_args();
 
-    let mut new = actual;
+    let max = get_number("max_brightness")?;
+    let actual = get_number("actual_brightness")?;
 
-    match opt.action {
+    let new = match opt.action {
         Action::Get => {
-            println!("{:.0}% ({})", 100.*actual/max, actual);
-        },
-        Action::Set {set} => {
-            new = clamp(max/100.0*set, 0., max);
-        },
-        Action::Inc {inc} => {
-            let step = max/100.0*inc;
-            new = clamp(actual+step, 0., max);
-        },
-        Action::Dec {dec} => {
-            let step = max/100.0*dec;
-            new = clamp(actual-step, 0., max);
+            println!("{:.0}% ({})", 100. * actual / max, actual);
+            return Ok(());
         }
-    }
-
-    let (current_id, filename) = {
-        let proj_dirs = ProjectDirs::from("", "", "Backlight");
-        if let Some(proj_dirs) = proj_dirs {
-            let filename = PathBuf::from(proj_dirs.cache_dir());
-            if let Ok(mut file) = File::open(&filename) {
-                let mut current_id = String::new();
-                if let Ok(_len) = file.read_to_string(&mut current_id) {
-                    if let Ok(current_id) = current_id.parse::<u32>() {
-                        (Some(current_id), Some(filename))
-                    }
-                    else  {
-                        if !opt.quiet {
-                            error!("Failed to parse u32");
-                        }
-                        (None, Some(filename))
-                    }
-
-                } else {
-                    if !opt.quiet {
-                        error!("Failed to read file");
-                    }
-                    (None, Some(filename))
-                }
-            } else {
-                (None, Some(filename))
-            }
-        } else{
-            (None, None)
+        Action::Set { set } => clamp(max / 100.0 * set, 0., max),
+        Action::Inc { inc } => {
+            let step = max / 100.0 * inc;
+            clamp(actual + step, 0., max)
+        }
+        Action::Dec { dec } => {
+            let step = max / 100.0 * dec;
+            clamp(actual - step, 0., max)
         }
     };
 
+    let filename = get_notification_filename();
+    let current_id = match &filename {
+        Some(filename) => get_notification_id(&opt, filename),
+        None => None,
+    };
+
     if (new - actual).abs() > 0.001 {
-        if !opt.quiet{
-            println!("{:.0}% ({})", 100.*new/max, new);
+        if !opt.quiet {
+            println!("{:.0}% ({})", 100. * new / max, new);
         }
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
-            .open("/sys/class/backlight/intel_backlight/brightness").unwrap();
+            .open("/sys/class/backlight/intel_backlight/brightness")
+            .expect("Could not open file for controlling brightness");
         write!(file, "{}", new as i32).unwrap();
         if !opt.quiet {
             let mut builder = Notification::new();
-            builder.summary(&format!("Brightness at {:.0}%", 100.*new/max));
+            builder.summary(&format!("Brightness at {:.0}%", 100. * new / max));
             builder.appname("backlight");
             if let Some(id) = current_id {
                 builder.id(id);
             }
             let nf = builder.show().unwrap();
-            if let Some(filename) = filename {
-                let mut run_state_file = OpenOptions::new()
+            if let Some(filename) = &filename {
+                if let Ok(mut run_state_file) = OpenOptions::new()
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .open(filename).expect("Failed to open state file");
-                write!(run_state_file, "{}", nf.id()).expect("Failed to write");
+                    .open(filename)
+                {
+                    let _ = write!(run_state_file, "{}", nf.id());
+                }
             }
         }
     }
+    Ok(())
 }
