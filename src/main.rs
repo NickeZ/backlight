@@ -17,7 +17,7 @@ macro_rules! error {
     }
 }
 
-fn get_number(file: &str) -> io::Result<f32> {
+fn get_number(file: &str) -> io::Result<i32> {
     let mut target = String::new();
     get_contents(file, &mut target).unwrap();
     let res = target.trim().parse().unwrap();
@@ -77,13 +77,13 @@ fn get_notification_id(opt: &Opt, filename: &PathBuf) -> Option<u32> {
 
 #[derive(StructOpt, Debug)]
 enum Action {
-    #[structopt(name = "get")]
+    #[structopt(name = "get", help = "Get brightness")]
     Get,
-    #[structopt(name = "set")]
+    #[structopt(name = "set", help = "Set brightness")]
     Set { set: f32 },
-    #[structopt(name = "inc")]
+    #[structopt(name = "inc", help = "Increase brightness")]
     Inc { inc: f32 },
-    #[structopt(name = "dec")]
+    #[structopt(name = "dec", help = "Decrease brightness")]
     Dec { dec: f32 },
 }
 
@@ -92,6 +92,8 @@ enum Action {
 struct Opt {
     #[structopt(short = "q", long = "quiet")]
     quiet: bool,
+    #[structopt(long = "time", help = "Change brightness over `time` milliseconds")]
+    time: Option<u64>,
     #[structopt(subcommand)]
     action: Action,
 }
@@ -104,17 +106,17 @@ fn main() -> io::Result<()> {
 
     let new = match opt.action {
         Action::Get => {
-            println!("{:.0}% ({})", 100. * actual / max, actual);
+            println!("{:.0}% ({})", 100. * actual as f32 / max as f32, actual);
             return Ok(());
         }
-        Action::Set { set } => clamp(max / 100.0 * set, 0., max),
+        Action::Set { set } => clamp((max as f32 / 100.0 * set).round() as i32, 0, max),
         Action::Inc { inc } => {
-            let step = max / 100.0 * inc;
-            clamp(actual + step, 0., max)
+            let step = max as f32 / 100.0 * inc;
+            clamp(actual + step as i32, 0, max)
         }
         Action::Dec { dec } => {
-            let step = max / 100.0 * dec;
-            clamp(actual - step, 0., max)
+            let step = max as f32 / 100.0 * dec;
+            clamp(actual - step as i32, 0, max)
         }
     };
 
@@ -124,19 +126,44 @@ fn main() -> io::Result<()> {
         None => None,
     };
 
-    if (new - actual).abs() > 0.001 {
+    let diff = new - actual;
+
+    let (steps, sleep_time) = if let Some(time) = opt.time {
+        let mut res = vec![actual; diff.abs() as usize];
+        for (i, r) in &mut res.iter_mut().enumerate() {
+            if diff > 0 {
+                *r += i as i32;
+            } else {
+                *r -= i as i32;
+            }
+        }
+        let sleep_time = if diff.abs() > 1 {
+            Some(std::time::Duration::from_micros(time*1000 / diff.abs() as u64))
+        } else {
+            None
+        };
+        (res, sleep_time)
+    } else if diff != 0 {
+        (vec![new], None)
+    } else {
+        (Vec::new(), None)
+    };
+
+    let init_time = std::time::SystemTime::now();
+
+    for (i, step) in steps.iter().enumerate() {
         if !opt.quiet {
-            println!("{:.0}% ({})", 100. * new / max, new);
+            println!("{:.0}% ({})", 100 * step / max, step);
         }
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
             .open("/sys/class/backlight/intel_backlight/brightness")
             .expect("Could not open file for controlling brightness");
-        write!(file, "{}", new as i32).unwrap();
+        write!(file, "{}", step).unwrap();
         if !opt.quiet {
             let mut builder = Notification::new();
-            builder.summary(&format!("Brightness at {:.0}%", 100. * new / max));
+            builder.summary(&format!("Brightness at {:.0}%", 100 * step / max));
             builder.appname("backlight");
             if let Some(id) = current_id {
                 builder.id(id);
@@ -150,6 +177,14 @@ fn main() -> io::Result<()> {
                     .open(filename)
                 {
                     let _ = write!(run_state_file, "{}", nf.id());
+                }
+            }
+        }
+        if let Some(sleep_time) = sleep_time {
+            if let Ok(elapsed) = init_time.elapsed() {
+                let should_elapsed = (i + 1) as u32 * sleep_time;
+                if elapsed < should_elapsed {
+                    std::thread::sleep(should_elapsed - elapsed);
                 }
             }
         }
