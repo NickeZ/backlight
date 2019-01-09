@@ -1,46 +1,36 @@
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io;
 use std::io::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::string::String;
 
 use directories::ProjectDirs;
 use notify_rust::Notification;
 use structopt::StructOpt;
 
-// Ignore errors when outputing errors
-// TODO: should only print if opt.quiet == false
-macro_rules! error {
-    ($($x:tt)*) => {
-        let _ = writeln!(std::io::stderr(), $($x)*);
+mod util;
+mod cli;
+mod backlight;
+
+use crate::cli::{Action, Opt};
+use crate::backlight::{BacklightDevice, Intel};
+
+mod error {
+    #[derive(Debug)]
+    pub enum Error {
+        Io(std::io::Error),
+    }
+
+    impl From<std::io::Error> for Error {
+        fn from(err: std::io::Error) -> Self {
+            Error::Io(err)
+        }
     }
 }
 
-fn get_number(file: &str) -> io::Result<i32> {
-    let mut target = String::new();
-    get_contents(file, &mut target).unwrap();
-    let res = target.trim().parse().unwrap();
-    Ok(res)
-}
-
-fn get_contents(file: &str, target: &mut String) -> io::Result<()> {
-    let mut filename = String::from("/sys/class/backlight/intel_backlight/");
-    filename.push_str(file);
-
-    let mut file = File::open(&filename)?;
-    file.read_to_string(target)?;
-    Ok(())
-}
-
-fn clamp<T: PartialOrd>(val: T, min: T, max: T) -> T {
-    if val < min {
-        min
-    } else if val > max {
-        max
-    } else {
-        val
-    }
+// TODO: Implement more device types
+fn create_backlight(device: &str) -> Box<dyn BacklightDevice> {
+    Box::new(Intel::new(Path::new(&device[7..])))
 }
 
 fn get_notification_filename() -> Option<PathBuf> {
@@ -75,49 +65,25 @@ fn get_notification_id(opt: &Opt, filename: &PathBuf) -> Option<u32> {
         .ok()
 }
 
-#[derive(StructOpt, Debug)]
-enum Action {
-    #[structopt(name = "get", help = "Get brightness")]
-    Get,
-    #[structopt(name = "set", help = "Set brightness")]
-    Set { set: f32 },
-    #[structopt(name = "inc", help = "Increase brightness")]
-    Inc { inc: f32 },
-    #[structopt(name = "dec", help = "Decrease brightness")]
-    Dec { dec: f32 },
-}
-
-#[derive(StructOpt, Debug)]
-#[structopt(name = "backlight")]
-struct Opt {
-    #[structopt(short = "q", long = "quiet")]
-    quiet: bool,
-    #[structopt(long = "time", help = "Change brightness over `time` milliseconds")]
-    time: Option<u64>,
-    #[structopt(subcommand)]
-    action: Action,
-}
-
-fn main() -> io::Result<()> {
+fn main() -> Result<(), error::Error> {
     let opt = Opt::from_args();
 
-    let max = get_number("max_brightness")?;
-    let actual = get_number("actual_brightness")?;
+    let mut backlight = if let Some(device) = &opt.device {
+        create_backlight(device)
+    } else {
+        create_backlight("file:///sys/class/backlight/intel_backlight")
+    };
+
+    let (actual, native) = backlight.get()?;
 
     let new = match opt.action {
         Action::Get => {
-            println!("{:.0}% ({})", 100. * actual as f32 / max as f32, actual);
+            println!("{:.0}% ({})", actual, native);
             return Ok(());
         }
-        Action::Set { set } => clamp((max as f32 / 100.0 * set).round() as i32, 0, max),
-        Action::Inc { inc } => {
-            let step = max as f32 / 100.0 * inc;
-            clamp(actual + step as i32, 0, max)
-        }
-        Action::Dec { dec } => {
-            let step = max as f32 / 100.0 * dec;
-            clamp(actual - step as i32, 0, max)
-        }
+        Action::Set { set } => set,
+        Action::Inc { inc } => actual + inc,
+        Action::Dec { dec } => actual - dec,
     };
 
     let filename = get_notification_filename();
@@ -126,24 +92,28 @@ fn main() -> io::Result<()> {
         None => None,
     };
 
-    let diff = new - actual;
+
+    let diff = (new - actual).round() as i32;
 
     let (steps, sleep_time) = if let Some(time) = opt.time {
-        let mut res = vec![actual; diff.abs() as usize];
+        // When we do multi-step, round to nearest whole percent
+        let mut res = vec![actual.round(); diff.abs() as usize];
         for (i, r) in &mut res.iter_mut().enumerate() {
+            let offset = i as f32 + 1.;
             if diff > 0 {
-                *r += i as i32;
+                *r += offset;
             } else {
-                *r -= i as i32;
+                *r -= offset;
             }
         }
+        println!("DEBUG: {:?}", res);
         let sleep_time = if diff.abs() > 1 {
             Some(std::time::Duration::from_micros(time*1000 / diff.abs() as u64))
         } else {
             None
         };
         (res, sleep_time)
-    } else if diff != 0 {
+    } else if (new - actual).abs() > 0.01 {
         (vec![new], None)
     } else {
         (Vec::new(), None)
@@ -152,18 +122,14 @@ fn main() -> io::Result<()> {
     let init_time = std::time::SystemTime::now();
 
     for (i, step) in steps.iter().enumerate() {
+        let step = *step;
         if !opt.quiet {
-            println!("{:.0}% ({})", 100 * step / max, step);
+            println!("{:.1}%", step);
         }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open("/sys/class/backlight/intel_backlight/brightness")
-            .expect("Could not open file for controlling brightness");
-        write!(file, "{}", step).unwrap();
+        backlight.set(step)?;
         if !opt.quiet {
             let mut builder = Notification::new();
-            builder.summary(&format!("Brightness at {:.0}%", 100 * step / max));
+            builder.summary(&format!("Brightness at {:.1}%", step));
             builder.appname("backlight");
             if let Some(id) = current_id {
                 builder.id(id);
